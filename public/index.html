@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Descend</title>
+  <meta name="description" content="An AI-narrated survival text adventure in the ruined underground city of Dakavinor.">
+  <meta name="theme-color" content="#0b0907">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%230b0907'/%3E%3Cpath d='M14 14h36M20 24h24M26 34h12M30 44h4' stroke='%23e8892b' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=IM+Fell+English:ital@0;1&family=IM+Fell+English+SC&family=Pirata+One&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <script type="module" src="js/main.js"></script>
+</head>
+<body data-time="dusk">
+  <svg class="defs" width="0" height="0" aria-hidden="true" focusable="false">
+    <filter id="rough-edge" x="-5%" y="-5%" width="110%" height="110%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="3" seed="7" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="10" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </svg>
+
+  <div class="atmosphere" aria-hidden="true">
+    <div class="walls"></div>
+    <div class="torchlight"></div>
+    <canvas id="motes"></canvas>
+    <div class="grain"></div>
+    <div class="vignette"></div>
+    <div class="flash"></div>
+  </div>
+
+  <!-- Title -->
+  <section class="screen title-screen" id="screen-title">
+    <div class="title-block">
+      <p class="title-kicker">The Crown's mercy is a staircase</p>
+      <h1 class="title">Descend</h1>
+      <p class="title-sub">into the ruins of Dakavinor</p>
+    </div>
+    <div class="title-actions">
+      <button class="btn btn-primary" id="btn-continue" hidden>Continue the descent</button>
+      <button class="btn" id="btn-new">A new prisoner</button>
+    </div>
+    <p class="title-foot" id="narrator-status"></p>
+  </section>
+
+  <!-- Character creation -->
+  <section class="screen create-screen" id="screen-create" hidden>
+    <article class="writ">
+      <div class="writ-paper" aria-hidden="true"></div>
+      <header class="writ-head">
+        <p class="writ-kicker">By order of the Crown</p>
+        <h2>Writ of Condemnation</h2>
+      </header>
+      <div class="writ-fields">
+        <label class="field">
+          <span>The condemned</span>
+          <input id="cc-name" maxlength="28" autocomplete="off" spellcheck="false" placeholder="Name">
+        </label>
+        <fieldset class="field pronouns">
+          <legend>Called</legend>
+          <label><input type="radio" name="pronouns" value="he/him"><span>he</span></label>
+          <label><input type="radio" name="pronouns" value="she/her"><span>she</span></label>
+          <label><input type="radio" name="pronouns" value="they/them" checked><span>they</span></label>
+        </fieldset>
+      </div>
+      <p class="writ-body" id="cc-body"></p>
+      <div class="writ-grid">
+        <section>
+          <h3>Measure of the prisoner</h3>
+          <dl class="cc-stats" id="cc-stats"></dl>
+        </section>
+        <section>
+          <h3>Effects upon their person</h3>
+          <ul class="cc-gear" id="cc-gear"></ul>
+        </section>
+      </div>
+      <footer class="writ-actions">
+        <button class="btn btn-ink" id="btn-reroll" type="button">Roll the bones again</button>
+        <button class="btn btn-seal" id="btn-begin" type="button">Accept the sentence</button>
+      </footer>
+      <div class="wax-seal" aria-hidden="true"><span>D</span></div>
+    </article>
+  </section>
+
+  <!-- Game -->
+  <section class="screen game-screen" id="screen-game" hidden>
+    <header class="hud">
+      <div class="hud-left">
+        <span class="hud-mark">Descend</span>
+        <div class="hud-place">
+          <span class="hud-location" id="hud-location"></span>
+          <span class="hud-time">
+            <span class="hud-time-icon" id="hud-time-icon"></span>
+            <span id="hud-day"></span>
+            <span class="hud-sep">·</span>
+            <span class="gate" id="hud-gate"></span>
+          </span>
+        </div>
+      </div>
+      <div class="hud-right">
+        <div class="vitals">
+          <div class="vital health" title="Health"><span class="vital-label">Health</span><span class="bar"><i id="bar-health"></i></span><span class="vital-num" id="num-health"></span></div>
+          <div class="vital hunger" title="Hunger (10 = starving)"><span class="vital-label">Hunger</span><span class="bar"><i id="bar-hunger"></i></span><span class="vital-num" id="num-hunger"></span></div>
+          <div class="vital sanity" title="Sanity (0 = broken)"><span class="vital-label">Sanity</span><span class="bar"><i id="bar-sanity"></i></span><span class="vital-num" id="num-sanity"></span></div>
+        </div>
+        <div class="hud-relics" title="Artifacts delivered to the Warden"><span class="relic-glyph" aria-hidden="true">✶</span><span id="hud-artifacts"></span></div>
+        <button class="btn btn-small" id="btn-sheet" type="button" aria-controls="sheet" aria-expanded="false">Ledger</button>
+        <button class="btn btn-small btn-ghost" id="btn-menu" type="button" aria-label="Menu" aria-expanded="false">☰</button>
+        <div class="game-menu" id="game-menu" hidden>
+          <button type="button" data-menu="new">Begin a new descent</button>
+          <button type="button" data-menu="title">Return to the title</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="story-wrap">
+      <div class="story-scroll" id="story-scroll">
+        <div class="story" id="story" aria-live="polite"></div>
+      </div>
+    </main>
+
+    <form class="action-bar" id="action-form" autocomplete="off">
+      <div class="action-inner">
+        <span class="action-glyph" aria-hidden="true">❧</span>
+        <textarea id="action-input" rows="1" maxlength="500" placeholder="What do you do?" aria-label="Your action"></textarea>
+        <button class="btn btn-act" id="btn-act" type="submit">Act</button>
+      </div>
+      <p class="action-hint">Enter to act · Shift+Enter for a new line · click the <em class="hint-item">highlighted</em> words to interact</p>
+    </form>
+  </section>
+
+  <!-- Character ledger -->
+  <aside class="sheet" id="sheet" aria-label="Character ledger" aria-hidden="true">
+    <div class="sheet-page">
+      <div class="sheet-paper" aria-hidden="true"></div>
+      <button class="sheet-close" id="sheet-close" type="button" aria-label="Close ledger">✕</button>
+      <div class="sheet-content" id="sheet-content"></div>
+    </div>
+  </aside>
+
+  <div class="entity-menu" id="entity-menu" role="menu" hidden></div>
+
+  <div class="examine" id="examine" hidden>
+    <div class="examine-backdrop" data-close></div>
+    <div class="examine-stage" id="examine-stage">
+      <article class="examine-card" id="examine-card" role="dialog" aria-modal="true"></article>
+    </div>
+  </div>
+
+  <div class="ending" id="ending" hidden>
+    <div class="ending-inner">
+      <p class="ending-kicker" id="ending-kicker"></p>
+      <h2 class="ending-title" id="ending-title"></h2>
+      <p class="ending-text" id="ending-text"></p>
+      <div class="ending-actions">
+        <button class="btn btn-small btn-ghost" id="btn-ending-read" type="button">Read the tale</button>
+        <button class="btn btn-primary" id="btn-ending-new" type="button">Descend again</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
