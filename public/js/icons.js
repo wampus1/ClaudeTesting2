@@ -390,6 +390,47 @@ const ICONS = {
     <path d="M40 24 L44 20 L52 28 L48 32 Z" fill="#cfc7b0" ${O}/>
     <path d="M10 60 C16 56 20 60 26 58" stroke="#e8e2d2" stroke-width="2" fill="none" stroke-linecap="round"/>`),
 
+  watch: (n) => {
+    const ticks = Array.from({ length: 12 }, (_, i) => {
+      const a = (i / 12) * Math.PI * 2;
+      const r1 = i % 3 ? 12.5 : 11;
+      return `M${(32 + Math.sin(a) * r1).toFixed(1)} ${(38 - Math.cos(a) * r1).toFixed(1)} L${(32 + Math.sin(a) * 14).toFixed(1)} ${(38 - Math.cos(a) * 14).toFixed(1)}`;
+    }).join(' ');
+    return svg(`
+      <path d="M22 7 C12 10 10 22 16 27" fill="none" stroke="${INK}" stroke-width="3.5"/>
+      <path d="M22 7 C12 10 10 22 16 27" fill="none" stroke="${C.gold}" stroke-width="1.6" stroke-dasharray="2 1.5"/>
+      <circle cx="32" cy="9" r="4.5" fill="none" stroke="${INK}" stroke-width="4"/>
+      <circle cx="32" cy="9" r="4.5" fill="none" stroke="${C.gold}" stroke-width="2"/>
+      <rect x="28.5" y="13" width="7" height="6" rx="1" fill="${C.bronze}" ${O}/>
+      <circle cx="32" cy="38" r="20" fill="${C.gold}" ${O}/>
+      <circle cx="32" cy="38" r="15.5" fill="#efe4c6" ${O}/>
+      <path d="${ticks}" stroke="${INK}" stroke-width="1.3"/>
+      <path d="M32 38 L32 27 M32 38 L39.5 41.5" stroke="${INK}" stroke-width="2" stroke-linecap="round"/>
+      <circle cx="32" cy="38" r="1.8" fill="${INK}"/>
+      <path d="M17 30 C19 24 24 20 30 19" stroke="#fff" stroke-width="1.6" fill="none" opacity=".45"/>
+      ${/crack|dent|broken|old/.test(n) ? `<path d="M40 27 L36 33 L41 37 L37 44" stroke="${INK}" stroke-width="1" fill="none" opacity=".75"/>` : ''}`);
+  },
+
+  compass: () => svg(`
+    <circle cx="32" cy="34" r="22" fill="${C.bronze}" ${O}/>
+    <circle cx="32" cy="34" r="17" fill="#e8dcbc" ${O}/>
+    <path d="M32 19 L32 22 M32 46 L32 49 M17 34 L20 34 M44 34 L47 34" stroke="${INK}" stroke-width="1.6"/>
+    <path d="M32 21 L36 34 L28 34 Z" fill="${C.blood}" ${O}/>
+    <path d="M32 47 L36 34 L28 34 Z" fill="${C.ironDark}" ${O}/>
+    <circle cx="32" cy="34" r="2" fill="${C.gold}" ${O}/>
+    <rect x="28" y="7" width="8" height="6" rx="2" fill="${C.bronzeDark}" ${O}/>
+    <path d="M16 26 C18 20 23 16 29 15" stroke="#fff" stroke-width="1.5" fill="none" opacity=".4"/>`),
+
+  spyglass: () => svg(`
+    <rect x="5" y="23" width="21" height="18" rx="2" fill="${C.bronze}" ${O}/>
+    <rect x="25" y="25.5" width="17" height="13" rx="1.5" fill="${C.leather}" ${O}/>
+    <rect x="41" y="27.5" width="15" height="9" rx="1.5" fill="${C.bronze}" ${O}/>
+    <rect x="55" y="28.5" width="5" height="7" rx="1" fill="${C.bronzeDark}" ${O}/>
+    <ellipse cx="5" cy="32" rx="3" ry="9" fill="${C.glass}" ${O}/>
+    <path d="M9 23 L9 41 M22 23 L22 41 M44 27.5 L44 36.5" stroke="${C.bronzeDark}" stroke-width="1.6"/>
+    <path d="M8 26 L24 26" stroke="${C.bronzeLight}" stroke-width="1.5"/>
+    <path d="M28 28.5 L40 28.5" stroke="${C.leatherLight}" stroke-width="1.3"/>`),
+
   sack: (n) => svg(`
     <path d="M22 20 C14 28 10 40 12 48 C14 56 24 58 32 58 C40 58 50 56 52 48 C54 40 50 28 42 20 Z" fill="${/purse|pouch/.test(n) ? C.leather : C.sack}" ${O}/>
     <path d="M24 13 L40 13 L42 20 L22 20 Z" fill="${/purse|pouch/.test(n) ? C.leather : C.sack}" ${O}/>
@@ -406,6 +447,9 @@ const ICON_RULES = [
   [/\b(star-disc|disc|disk|astrolabe|star-chart|tablet|plaque)\b/, 'disc'],
   [/\b(reliquary|casket|chest|box|urn|coffer)\b/, 'casket'],
   [/\b(chalk)\b/, 'chalk'],
+  [/\b(pocket ?watch|watch|timepiece|chronometer|fob)\b/, 'watch'],
+  [/\b(compass|lodestone)\b/, 'compass'],
+  [/\b(spyglass|telescope|looking glass)\b/, 'spyglass'],
   [/\b(mushroom|fungus|toadstool|puffball)\b/, 'mushroom'],
   [/\b(sword|blade|sabre|saber|falchion|scimitar|longsword)\b/, 'sword'],
   [/\b(dagger|knife|shiv|shank|dirk|stiletto|tine|razor|scalpel)\b/, 'dagger'],
@@ -447,7 +491,7 @@ const ICON_RULES = [
 
 const TYPE_FALLBACK = {
   weapon: 'dagger', armor: 'tunic', clothing: 'tunic', tool: 'pick', light: 'candle', food: 'bread',
-  drink: 'bottle', medicine: 'bandage', key: 'key', valuable: 'gem', artifact: 'mask', junk: 'sack',
+  drink: 'bottle', medicine: 'bandage', key: 'key', valuable: 'gem', artifact: 'mask', junk: 'sack', gadget: 'watch', relic: 'orb',
 };
 
 export function itemIconKey(item) {
@@ -457,7 +501,7 @@ export function itemIconKey(item) {
   for (const [re, key] of ICON_RULES) {
     if (!re.test(name)) continue;
     // Artifacts keep an artifact-looking icon even if the name mentions something mundane.
-    if (isArtifact && !['mask', 'idol', 'orb', 'disc', 'casket', 'gem', 'skull', 'book', 'scroll', 'ring', 'amulet', 'key', 'sword', 'dagger'].includes(key)) continue;
+    if (isArtifact && !['mask', 'idol', 'orb', 'disc', 'casket', 'watch', 'compass', 'spyglass', 'gem', 'skull', 'book', 'scroll', 'ring', 'amulet', 'key', 'sword', 'dagger'].includes(key)) continue;
     return key;
   }
   return TYPE_FALLBACK[type] || 'sack';
@@ -658,3 +702,11 @@ export function npcPortrait(npc, alignment) {
   for (const [re, draw] of PORTRAIT_RULES) if (re.test(desc)) return draw(v, eye);
   return human(v, eye);
 }
+
+/* ---------------------------------------------------------------- interface glyphs */
+
+/** The side-rail button that opens the inventory: a small hooded prisoner. */
+export const PERSON_GLYPH = `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 31 C6 23 10 20 16 20 C22 20 26 23 27 31 Z" fill="currentColor" opacity=".8"/><path d="M9 21 C8 12 11 4 16 3.5 C21 4 24 12 23 21 C20 18.5 12 18.5 9 21 Z" fill="currentColor"/><path d="M12.5 17 C12 12 13.5 8.5 16 8 C18.5 8.5 20 12 19.5 17 C18 18 14 18 12.5 17 Z" fill="#0b0907"/><circle cx="14.4" cy="13" r=".9" fill="#f0922e"/><circle cx="17.6" cy="13" r=".9" fill="#f0922e"/></svg>`;
+
+/** The side-rail button that opens the ledger: a bound book with a quill. */
+export const LEDGER_GLYPH = `<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 6 C10 5 13 6 16 8 C19 6 22 5 26 6 L26 26 C22 25 19 26 16 28 C13 26 10 25 6 26 Z" fill="currentColor" opacity=".85"/><path d="M16 8 L16 28" stroke="#0b0907" stroke-width="1.4"/><path d="M9 11 L13.5 12 M9 15 L13.5 16 M18.5 12 L23 11 M18.5 16 L23 15" stroke="#0b0907" stroke-width="1.1"/><path d="M29 2 C24 5 21 10 19 17 L20.5 17.5 C23 11 26 7 29 2 Z" fill="#f0922e"/></svg>`;

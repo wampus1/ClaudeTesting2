@@ -10,9 +10,10 @@
     "mock": "node server.js --mock"
   },
   "engines": {
-    "node": ">=20.12"
+    "node": ">=22"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.128.0"
+    "@anthropic-ai/sdk": "^0.128.0",
+    "openai": "^7.23.0"
   }
 }

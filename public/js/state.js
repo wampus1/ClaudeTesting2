@@ -1,48 +1,26 @@
-// Applies the narrator's state tags to the character sheet.
-// Each apply* returns a list of short notices for the story log.
+// The character sheet and the narrator's state tags. Each apply* returns short notices for the story log.
+// No DOM here: the server imports this module too.
 
 import { SLOTS } from './character.js';
+import { fits, newId, place, stowLoose } from './grid.js';
+import { START_CLOCK, clockParts, formatDuration, parseElapsed } from './clock.js';
 
 const STAT_ALIASES = {
-  hp: 'health',
-  health: 'health',
-  life: 'health',
-  maxhealth: 'maxHealth',
-  max_health: 'maxHealth',
-  maxhp: 'maxHealth',
-  hunger: 'hunger',
-  sanity: 'sanity',
-  strength: 'strength',
-  str: 'strength',
-  agility: 'agility',
-  agi: 'agility',
-  endurance: 'endurance',
-  wits: 'wits',
-  presence: 'presence',
-  luck: 'luck',
-  coin: 'coin',
-  coins: 'coin',
-  copper: 'coin',
-  coppers: 'coin',
-  money: 'coin',
+  hp: 'health', health: 'health', life: 'health',
+  maxhealth: 'maxHealth', max_health: 'maxHealth', maxhp: 'maxHealth',
+  hunger: 'hunger', sanity: 'sanity',
+  strength: 'strength', str: 'strength', agility: 'agility', agi: 'agility',
+  endurance: 'endurance', wits: 'wits', presence: 'presence', luck: 'luck',
+  coin: 'coin', coins: 'coin', copper: 'coin', coppers: 'coin', money: 'coin',
 };
 
 const STAT_LABELS = {
-  health: 'Health',
-  maxHealth: 'Max health',
-  hunger: 'Hunger',
-  sanity: 'Sanity',
-  strength: 'Strength',
-  agility: 'Agility',
-  endurance: 'Endurance',
-  wits: 'Wits',
-  presence: 'Presence',
-  luck: 'Luck',
-  coin: 'Coin',
+  health: 'Health', maxHealth: 'Max health', hunger: 'Hunger', sanity: 'Sanity', strength: 'Strength', agility: 'Agility',
+  endurance: 'Endurance', wits: 'Wits', presence: 'Presence', luck: 'Luck', coin: 'Coin',
 };
 
-const TIMES = ['dawn', 'day', 'dusk', 'night'];
-const SLOT_KEYS = SLOTS.map((s) => s.key);
+export const SLOT_KEYS = SLOTS.map((s) => s.key);
+const GRID_FIELDS = ['x', 'y', 'rot'];
 
 export const npcKey = (name) => String(name || '').trim().toLowerCase();
 const toInt = (v) => {
@@ -51,14 +29,16 @@ const toInt = (v) => {
 };
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const stripGrid = (item) => Object.fromEntries(Object.entries(item).filter(([k]) => !GRID_FIELDS.includes(k)));
 
 export function makeItem(name, fields = {}) {
   const item = { name: String(name).trim() };
   for (const [k, v] of Object.entries(fields)) {
-    if (k === 'name' || v === '' || v == null) continue;
+    if (['name', 'id', 'x', 'y', 'rot', 'qty'].includes(k) || v === '' || v == null) continue;
     item[k] = String(v);
   }
   if (item.durability != null && item.maxDurability == null) item.maxDurability = item.durability;
+  item.id = newId();
   item.qty = 1;
   return item;
 }
@@ -96,35 +76,118 @@ function removeOne(state, found) {
     const item = state.pack[found.index];
     if ((item.qty || 1) > 1) item.qty -= 1;
     else state.pack.splice(found.index, 1);
+    stowLoose(state.pack);
   } else {
     state.equipment[found.slot] = null;
   }
 }
 
-function addToPack(state, item) {
-  const same = state.pack.find((p) => npcKey(p.name) === npcKey(item.name) && p.type === item.type && !p.durability);
-  if (same && !item.durability) same.qty = (same.qty || 1) + 1;
-  else state.pack.push({ ...item, qty: item.qty || 1 });
+const stackable = (item) => !item.durability && !/artifact|relic|gadget|weapon|armor|clothing/i.test(item.type || '');
+
+/** Adds an item to the pack: onto a matching stack, into the first free spot, or loose if full. Returns false if loose. */
+export function addToPack(state, item) {
+  const same = stackable(item) && state.pack.find((p) => npcKey(p.name) === npcKey(item.name) && p.type === item.type && stackable(p));
+  if (same) {
+    same.qty = (same.qty || 1) + (item.qty || 1);
+    return true;
+  }
+  const packed = { ...stripGrid(item), id: item.id || newId(), qty: item.qty || 1 };
+  const fit = place(state.pack, packed);
+  state.pack.push(packed);
+  return fit;
 }
 
-export function inferSlot(item, hint) {
-  const h = npcKey(hint);
-  if (SLOT_KEYS.includes(h)) return h;
-  if (['hand', 'hands', 'main hand', 'weapon'].includes(h)) return 'weapon';
-  const name = npcKey(item.name);
-  const type = npcKey(item.type);
+/* ---------------------------------------------------------------- equipment */
+
+/** Which kind of slot an item belongs in: weapon, head, body, feet, trinket, gadget, relic, or null. */
+export function slotFamily(item) {
+  const name = npcKey(item?.name);
+  const type = npcKey(item?.type);
+  if (type === 'artifact' || type === 'relic') return 'relic';
+  if (type === 'gadget' || /\b(pocket ?watch|watch|timepiece|compass|spyglass|telescope|lens|clockwork|lockpicks?|picklock|tinderbox|whistle|sextant|lodestone)\b/.test(name)) return 'gadget';
   if (type === 'weapon') return 'weapon';
-  if (/\b(helm|helmet|hood|hat|cap|coif|cowl|mask|crown|skullcap)\b/.test(name) && type !== 'artifact') return 'head';
-  if (/\b(boots?|shoes?|clogs?|sandals?|wraps|greaves)\b/.test(name)) return 'feet';
-  if (/\b(ring|amulet|medallion|pendant|charm|talisman|necklace|locket|brooch)\b/.test(name)) return 'trinket';
+  if (/\b(helm|helmet|hood|hat|cap|coif|cowl|crown|skullcap)\b/.test(name)) return 'head';
+  if (/\b(boots?|shoes?|clogs?|sandals?|wraps|greaves|feet)\b/.test(name)) return 'feet';
+  if (/\b(ring|amulet|medallion|pendant|charm|talisman|necklace|locket|brooch|knucklebone|lock of hair)\b/.test(name)) return 'trinket';
   if (type === 'armor' || type === 'clothing') return 'body';
   return null;
 }
 
+/** Can `item` go in `slot`? Hands can hold anything that isn't worn. */
+export function slotAccepts(slot, item) {
+  const family = slotFamily(item);
+  if (slot === 'weapon') return !['head', 'body', 'feet'].includes(family);
+  if (slot === 'gadget1' || slot === 'gadget2') return family === 'gadget';
+  return family === slot;
+}
+
+/** Resolves a slot name from the narrator ("gadget", "hand") or the item itself to an actual slot key. */
+export function targetSlot(state, item, hint) {
+  const h = npcKey(hint).replace(/\s+/g, '');
+  const family = ['hand', 'hands', 'mainhand', 'held'].includes(h) ? 'weapon' : SLOT_KEYS.includes(h) ? h : ['gadget', 'relic', 'weapon', 'head', 'body', 'feet', 'trinket'].includes(h) ? h : slotFamily(item) || 'weapon';
+  if (family === 'gadget') return !state.equipment.gadget1 ? 'gadget1' : !state.equipment.gadget2 ? 'gadget2' : 'gadget1';
+  return family;
+}
+
+/**
+ * Moves `item` (from the pack or another slot) into `slot`. Whatever was there goes to the
+ * pack, at `displacedAt` if it fits there, otherwise the first free spot.
+ */
+export function equip(state, item, slot, displacedAt = null) {
+  let equipped;
+  const index = state.pack.indexOf(item);
+  if (index !== -1) {
+    if ((item.qty || 1) > 1) {
+      item.qty -= 1;
+      equipped = { ...stripGrid(item), id: newId(), qty: 1 };
+    } else {
+      state.pack.splice(index, 1);
+      equipped = { ...stripGrid(item), qty: 1 };
+    }
+  } else {
+    const from = SLOT_KEYS.find((k) => state.equipment[k] === item);
+    if (!from) return false;
+    state.equipment[from] = null;
+    equipped = item;
+  }
+  const previous = state.equipment[slot];
+  state.equipment[slot] = equipped;
+  if (previous) {
+    const packed = { ...stripGrid(previous), rot: false };
+    if (displacedAt && fits(state.pack, packed, displacedAt.x, displacedAt.y, displacedAt.rot)) Object.assign(packed, displacedAt);
+    else place(state.pack, packed);
+    state.pack.push(packed);
+  }
+  stowLoose(state.pack);
+  return true;
+}
+
+/** Takes the item out of `slot` into the pack, at `at` if it fits there. */
+export function unequip(state, slot, at = null) {
+  const item = state.equipment[slot];
+  if (!item) return false;
+  state.equipment[slot] = null;
+  const packed = { ...stripGrid(item), rot: false };
+  if (at && fits(state.pack, packed, at.x, at.y, at.rot)) Object.assign(packed, at);
+  else place(state.pack, packed);
+  state.pack.push(packed);
+  return true;
+}
+
+/** Only an equipped pocket watch tells the hour. */
+export function hasWatch(state) {
+  return Object.values(state?.equipment || {}).some((item) => item && /\b(pocket ?watch|watch|timepiece|chronometer|clock)\b/i.test(item.name || ''));
+}
+
+/* ---------------------------------------------------------------- tags */
+
 function applyGain(state, tag) {
+  // "[Gain: "12 coppers"]" is money, not an item.
+  const money = tag.value.match(/^\s*(\d+)\s*(coppers?|coins?|crowns?|pennies)\s*$/i);
+  if (money) return applyStat(state, { value: 'coin', fields: { change: `+${money[1]}` } });
   const item = makeItem(tag.value, tag.fields);
-  addToPack(state, item);
-  return [{ kind: 'gain', text: `${cap(item.name)} taken` }];
+  const fit = addToPack(state, item);
+  return [{ kind: 'gain', item: item.name, text: fit ? `${cap(item.name)} taken` : `${cap(item.name)} carried loose (no room)` }];
 }
 
 function applyLose(state, tag) {
@@ -136,21 +199,17 @@ function applyLose(state, tag) {
 
 function applyEquip(state, tag) {
   const found = findItem(state, tag.value);
-  if (!found || found.where === 'slot') return [];
-  const slot = inferSlot(found.item, tag.fields.slot) || 'trinket';
-  const item = { ...found.item, qty: 1 };
-  removeOne(state, found);
-  const previous = state.equipment[slot];
-  if (previous) addToPack(state, previous);
-  state.equipment[slot] = item;
-  return [{ kind: 'gain', text: `${cap(item.name)} equipped` }];
+  if (!found) return [];
+  const slot = targetSlot(state, found.item, tag.fields.slot);
+  if (state.equipment[slot] === found.item) return [];
+  equip(state, found.item, slot);
+  return [{ kind: 'gain', text: `${cap(found.item.name)} equipped` }];
 }
 
 function applyUnequip(state, tag) {
   const found = findItem(state, tag.value);
   if (!found || found.where !== 'slot') return [];
-  state.equipment[found.slot] = null;
-  addToPack(state, found.item);
+  unequip(state, found.slot);
   return [{ kind: 'neutral', text: `${cap(found.item.name)} stowed` }];
 }
 
@@ -190,23 +249,21 @@ function applyWear(state, tag) {
   item.durability = String(next);
   if (next > 0) return [{ kind: 'down', text: `${cap(item.name)} wears (${next}/${item.maxDurability ?? current})` }];
   removeOne(state, found);
-  return [{ kind: 'lose', text: `${cap(item.name)} breaks` }];
+  return [{ kind: 'lose', broke: true, text: `${cap(item.name)} breaks` }];
 }
 
-function applyTime(state, tag) {
-  const time = npcKey(tag.value).replace(/[^a-z]/g, '');
-  const next = TIMES.includes(time) ? time : time === 'morning' ? 'dawn' : time === 'evening' ? 'dusk' : time === 'midnight' ? 'night' : null;
-  if (!next || next === state.time) return [];
-  const previous = state.time;
-  if ((previous === 'night' || previous === 'dusk') && (next === 'dawn' || next === 'day')) state.day += 1;
-  state.time = next;
-  const text = {
-    dawn: `Dawn of day ${state.day}`,
-    day: 'Day — the gate stands open',
-    dusk: 'Dusk gathers',
-    night: 'Night — the gate is sealed',
-  }[next];
-  return [{ kind: 'time', text }];
+/** Advances the clock. Time notices are only shown to a player with a pocket watch. */
+function applyElapsed(state, tag) {
+  const minutes = parseElapsed(tag.value);
+  const before = clockParts(state.clock);
+  state.clock = (state.clock ?? START_CLOCK) + minutes;
+  const after = clockParts(state.clock);
+  const notices = [{ kind: 'elapsed', minutes, text: `${formatDuration(minutes)} ${minutes === 1 || minutes === 60 ? 'passes' : 'pass'}` }];
+  if (before.gateOpen !== after.gateOpen) {
+    notices.push({ kind: 'gate', open: after.gateOpen, text: after.gateOpen ? 'The gate opens' : 'The gate is sealed' });
+  }
+  if (after.day > before.day) notices.push({ kind: 'dawn', text: `Day ${after.day} begins` });
+  return notices;
 }
 
 function applyLocation(state, tag) {
@@ -232,7 +289,8 @@ function applyNpc(state, tag, turn) {
   const peak = Math.max(toInt(previous.peakHealth) ?? 0, toInt(tag.fields.health) ?? 0);
   if (peak > 0) npc.peakHealth = String(peak);
   state.npcs[key] = npc;
-  return [];
+  const turnedHostile = alignmentOf(npc) === 'hostile' && alignmentOf(previous) !== 'hostile' && !isDead(npc);
+  return turnedHostile ? [{ kind: 'hostile', silent: true, text: npc.name }] : [];
 }
 
 /** Applies one parsed tag to `state` in place. */
@@ -245,14 +303,14 @@ export function applyTag(state, tag) {
     case 'unequip': return applyUnequip(state, tag);
     case 'stat': return applyStat(state, tag);
     case 'wear': return applyWear(state, tag);
-    case 'time': return applyTime(state, tag);
+    case 'elapsed': return applyElapsed(state, tag);
     case 'location': return applyLocation(state, tag);
     case 'deliver': return applyDeliver(state, tag);
     case 'end': {
-      const ending = /free/i.test(tag.value) ? 'freedom' : 'death';
-      state.ended = ending;
+      state.ended = /free/i.test(tag.value) ? 'freedom' : 'death';
       return [];
     }
+    // [Time: ...] came from older saves; the clock is the game's now.
     default: return [];
   }
 }
@@ -267,4 +325,24 @@ export function alignmentOf(data) {
 export function isDead(data) {
   const hp = toInt(data?.health);
   return hp != null && hp <= 0;
+}
+
+/** Brings a character sheet from an older save up to date: new slots, item ids, grid positions, the clock. */
+export function migrateState(state) {
+  for (const { key } of SLOTS) if (!(key in state.equipment)) state.equipment[key] = null;
+  for (const item of Object.values(state.equipment)) if (item && !item.id) item.id = newId();
+  const pack = [];
+  for (const item of state.pack || []) {
+    if (!item.id) item.id = newId();
+    if (item.x === undefined) place(pack, item);
+    pack.push(item);
+  }
+  state.pack = pack;
+  if (state.clock == null) {
+    const hour = { dawn: 6 * 60, day: 12 * 60, dusk: 19 * 60 + 30, night: 22 * 60 }[state.time] ?? START_CLOCK;
+    state.clock = ((state.day || 1) - 1) * 24 * 60 + hour;
+  }
+  delete state.day;
+  delete state.time;
+  return state;
 }

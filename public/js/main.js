@@ -1,15 +1,24 @@
 import { ATTRIBUTES, SLOTS, randomName, rollCharacter } from './character.js';
-import { itemIcon } from './icons.js';
-import { applyTag, inferSlot, npcKey, alignmentOf, isDead } from './state.js';
+import { itemIcon, PERSON_GLYPH, LEDGER_GLYPH } from './icons.js';
+import { applyTag, npcKey, alignmentOf, isDead, hasWatch, slotAccepts, targetSlot, migrateState } from './state.js';
+import { itemShape } from './grid.js';
 import { Passage, entities, refreshNpcMentions } from './story.js';
 import { startMotes } from './atmosphere.js';
+import { settings, saveSettings, detectProvider, server, effectiveProvider, narratorReady, PROVIDER_LABELS } from './settings.js';
+import { postJson, getJson, streamTurn } from './api.js';
+import { needsCompaction, compact } from './memory.js';
+import { initArt, requestArt, dropArt, resetArtSession } from './art.js';
+import { sfx, unlockAudio, configureAudio } from './audio.js';
+import { initInventory, renderInventory, setInventoryOpen, isInventoryOpen } from './inventory.js';
 import {
   renderHud, renderSheet, setSheetOpen, openMenu, closeMenu, examineItem, examineNpc,
-  closeExamine, flash, showEnding, escapeHtml,
+  closeExamine, flash, showEnding, escapeHtml, refreshExamineArt,
 } from './ui.js';
 
-const SAVE_KEY = 'descend.save.v1';
+const SAVE_KEY = 'descend.save.v2';
+const OLD_SAVE_KEY = 'descend.save.v1';
 const $ = (sel) => document.querySelector(sel);
+const TIME_NOTICES = new Set(['elapsed', 'gate', 'dawn', 'time']);
 
 const WAITING_LINES = [
   'The torch gutters…',
@@ -20,16 +29,22 @@ const WAITING_LINES = [
   'Stone settles. Dust falls…',
 ];
 
-/** The whole game: character sheet, the transcript sent to the narrator, and the rendered log. */
+/**
+ * The whole game: the character sheet, the recent transcript sent to the narrator, the chronicle
+ * of condensed older turns, the full rendered log, and generated illustrations.
+ */
 let game = null;
 let draft = null;
 let busy = false;
+let compacting = null;
 
 /* ---------------------------------------------------------------- persistence */
 
 function save() {
+  if (!game) return;
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify(game));
+    localStorage.removeItem(OLD_SAVE_KEY);
   } catch {
     // Storage full or blocked; the game continues unsaved.
   }
@@ -37,8 +52,16 @@ function save() {
 
 function loadSave() {
   try {
-    const data = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
-    if (data?.version === 1 && data.state && Array.isArray(data.history) && Array.isArray(data.log)) return data;
+    let data = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
+    if (!data) {
+      const old = JSON.parse(localStorage.getItem(OLD_SAVE_KEY) || 'null');
+      if (old?.version === 1 && old.state) data = { ...old, version: 2, state: migrateState(old.state), memory: [], art: {} };
+    }
+    if (data?.version === 2 && data.state && Array.isArray(data.history) && Array.isArray(data.log)) {
+      data.memory ||= [];
+      data.art ||= {};
+      return data;
+    }
   } catch {
     // Corrupt save; ignore it.
   }
@@ -46,7 +69,10 @@ function loadSave() {
 }
 
 function clearSave() {
-  try { localStorage.removeItem(SAVE_KEY); } catch { /* ignore */ }
+  try {
+    localStorage.removeItem(SAVE_KEY);
+    localStorage.removeItem(OLD_SAVE_KEY);
+  } catch { /* ignore */ }
 }
 
 /* ---------------------------------------------------------------- screens */
@@ -56,6 +82,8 @@ function show(screen) {
   closeMenu();
   closeExamine();
   setSheetOpen(false);
+  setInventoryOpen(false);
+  document.body.classList.remove('inventory-open');
   $('#ending').hidden = true;
 }
 
@@ -64,6 +92,154 @@ function showTitle() {
   $('#btn-continue').hidden = !saved;
   $('#btn-continue').textContent = saved?.state.ended ? 'Read your last tale' : 'Continue the descent';
   show('screen-title');
+  refreshNarratorCard();
+}
+
+/* ---------------------------------------------------------------- the narrator card (title screen) */
+
+let checkTimer = 0;
+let checkResult = null;
+// A key pasted before a narrator was chosen, whose prefix didn't say which it belongs to.
+let unassignedKey = '';
+
+function refreshNarratorCard() {
+  const provider = effectiveProvider();
+  document.querySelectorAll('.provider-pick button').forEach((b) => {
+    const on = b.dataset.provider === provider;
+    b.setAttribute('aria-checked', String(on));
+    b.classList.toggle('on', on);
+    b.disabled = server.forceMock && b.dataset.provider !== 'mock';
+  });
+  const keyed = provider === 'anthropic' || provider === 'openai';
+  // The key field is always offered (except in the demo): pasting a key picks Claude or GPT by its prefix.
+  $('#key-row').hidden = provider === 'mock';
+  const input = $('#api-key');
+  if (document.activeElement !== input) input.value = keyed ? settings.keys[provider] || '' : unassignedKey;
+  input.placeholder = provider === 'anthropic' ? 'Paste your Claude key (sk-ant-…)' : provider === 'openai' ? 'Paste your OpenAI key (sk-…)' : 'Paste a Claude or GPT API key';
+  const model = $('#model-input');
+  model.disabled = !keyed;
+  model.value = keyed ? settings.models[provider] || '' : '';
+  model.placeholder = keyed ? server.defaults[provider] || '' : 'Choose Claude or GPT first';
+  $('#opt-illustrations').checked = settings.illustrations;
+  $('#opt-sound').checked = settings.sound;
+  $('#opt-ambience').checked = settings.ambience;
+  $('#opt-volume').value = settings.volume;
+  setKeyStatus();
+}
+
+function setKeyStatus(text, tone = '') {
+  const el = $('#key-status');
+  const provider = effectiveProvider();
+  if (text == null) {
+    if (server.forceMock) text = 'The server was started in demo mode (npm run mock): a canned tale, no AI.';
+    else if (!provider && unassignedKey) text = 'Is this a Claude key or a GPT key? Pick one above.';
+    else if (!provider) text = 'Paste a Claude or GPT API key to play. It stays in this browser. Or try the demo, which needs nothing.';
+    else if (provider === 'mock') text = 'Demo: a short canned tale with no AI and no cost.';
+    else if (checkResult?.provider === provider && checkResult.key === settings.keys[provider]) ({ text, tone } = checkResult);
+    else if (!settings.keys[provider] && server.env[provider]) text = `Using the ${PROVIDER_LABELS[provider]} key from the server's .env file.`;
+    else if (!settings.keys[provider]) text = `Paste your ${PROVIDER_LABELS[provider]} API key. It stays in this browser and is only sent to this game's own server.`;
+    else text = 'Key saved. Press Check to test it.';
+  }
+  el.textContent = text;
+  el.className = `key-status ${tone}`;
+}
+
+async function checkKey() {
+  const provider = effectiveProvider();
+  if (provider !== 'anthropic' && provider !== 'openai') return;
+  if (!settings.keys[provider] && !server.env[provider]) return setKeyStatus();
+  const key = settings.keys[provider];
+  setKeyStatus('Checking the key…', 'pending');
+  try {
+    const result = await postJson('/api/check', {});
+    if (effectiveProvider() !== provider || settings.keys[provider] !== key) return;
+    if (!result.ok) {
+      checkResult = { provider, key, text: result.message, tone: 'bad' };
+      sfx('invalid');
+    } else {
+      // Remember the models the key can actually use, unless the player chose their own.
+      if (!settings.models[provider] && result.model && result.model !== server.defaults[provider]) settings.models[provider] = result.model;
+      if (provider === 'openai' && result.imageModel && !settings.imageModel) settings.imageModel = result.imageModel;
+      saveSettings();
+      const art = provider === 'openai' ? (result.imageModel ? ` Illustrations painted by ${result.imageModel}.` : ' Illustrations will be drawn as ink sketches.') : '';
+      checkResult = { provider, key, text: `Key accepted. ${PROVIDER_LABELS[provider]} will narrate with ${result.model}.${art}${result.note ? ` ${result.note}` : ''}`, tone: result.available === false ? 'warn' : 'good' };
+      sfx('chime');
+    }
+  } catch (error) {
+    checkResult = { provider, key, text: error.message, tone: 'bad' };
+  }
+  refreshNarratorCard();
+}
+
+function initNarratorCard() {
+  document.querySelectorAll('.provider-pick button').forEach((b) => b.addEventListener('click', () => {
+    settings.provider = b.dataset.provider;
+    if (unassignedKey && settings.provider !== 'mock') {
+      settings.keys[settings.provider] = unassignedKey;
+      unassignedKey = '';
+    }
+    saveSettings();
+    resetArtSession();
+    refreshNarratorCard();
+    if (settings.provider !== 'mock' && settings.keys[settings.provider]) checkKey();
+  }));
+  const input = $('#api-key');
+  input.addEventListener('input', () => {
+    const key = input.value.trim();
+    const detected = detectProvider(key);
+    if (detected && detected !== settings.provider && !server.forceMock) settings.provider = detected;
+    const provider = effectiveProvider();
+    if (provider === 'anthropic' || provider === 'openai') settings.keys[provider] = key;
+    else unassignedKey = key;
+    saveSettings();
+    resetArtSession();
+    refreshNarratorCard();
+    clearTimeout(checkTimer);
+    if (key.length > 20) checkTimer = setTimeout(checkKey, 700);
+  });
+  $('#btn-key-show').addEventListener('click', (e) => {
+    const shown = input.type === 'text';
+    input.type = shown ? 'password' : 'text';
+    e.currentTarget.textContent = shown ? 'Show' : 'Hide';
+    e.currentTarget.setAttribute('aria-pressed', String(!shown));
+  });
+  $('#btn-key-check').addEventListener('click', checkKey);
+  $('#btn-key-forget').addEventListener('click', () => {
+    settings.keys = { anthropic: '', openai: '' };
+    saveSettings();
+    checkResult = null;
+    input.value = '';
+    refreshNarratorCard();
+  });
+  $('#model-input').addEventListener('change', (e) => {
+    const provider = effectiveProvider();
+    if (provider !== 'anthropic' && provider !== 'openai') return;
+    settings.models[provider] = e.target.value.trim();
+    saveSettings();
+    checkResult = null;
+    checkKey();
+  });
+  const bind = (id, key, parse = (el) => el.checked) => $(id).addEventListener('input', (e) => {
+    settings[key] = parse(e.target);
+    saveSettings();
+    configureAudio(settings);
+  });
+  bind('#opt-illustrations', 'illustrations');
+  bind('#opt-sound', 'sound');
+  bind('#opt-ambience', 'ambience');
+  bind('#opt-volume', 'volume', (el) => Number(el.value));
+}
+
+function requireNarrator() {
+  if (narratorReady()) return true;
+  const card = $('#narrator-card');
+  card.classList.remove('nudge');
+  void card.offsetWidth;
+  card.classList.add('nudge');
+  sfx('invalid');
+  setKeyStatus(effectiveProvider() ? 'Enter an API key first, or choose the demo.' : 'Choose who narrates first: Claude, GPT, or the demo.', 'bad');
+  ($('#key-row').hidden ? $('.provider-pick button') : $('#api-key')).focus();
+  return false;
 }
 
 /* ---------------------------------------------------------------- character creation */
@@ -102,7 +278,7 @@ function beginGame() {
   const state = structuredClone(draft);
   state.character.name = $('#cc-name').value.trim() || draft.character.name;
   state.character.pronouns = pronouns();
-  game = { version: 1, state, history: [], log: [] };
+  game = { version: 2, state, history: [], memory: [], log: [], art: {} };
   entities.clear();
   save();
   enterGame();
@@ -117,10 +293,12 @@ function npcClass(key) {
   return `${alignmentOf(npc)}${isDead(npc) ? ' dead' : ''}`;
 }
 
-function renderNotices(container, notices) {
-  if (!notices.length) return;
+/** Notices under a passage. Time passing is only noticed by someone with a watch. */
+function renderNotices(container, notices, knewTime) {
+  const shown = notices.filter((n) => !n.silent && (knewTime || !TIME_NOTICES.has(n.kind)));
+  if (!shown.length) return;
   const seen = new Set();
-  const unique = notices.filter((n) => !seen.has(n.text) && seen.add(n.text));
+  const unique = shown.filter((n) => !seen.has(n.text) && seen.add(n.text));
   const list = document.createElement('ul');
   list.className = 'notices';
   list.innerHTML = unique.map((n, i) => `<li class="notice ${n.kind}" style="animation-delay:${i * 80}ms">${escapeHtml(n.text)}</li>`).join('');
@@ -161,15 +339,20 @@ function enterGame() {
     passage.push(entry.raw);
     passage.end();
     if (entry === game.log[0]) markDropCap(passageEl);
-    renderNotices(turn, entry.notices || []);
+    renderNotices(turn, entry.notices || [], entry.knewTime);
   }
-  renderHud(game.state);
-  renderSheet(game.state);
+  renderAll();
   const ended = Boolean(game.state.ended);
   setInputEnabled(!ended);
   requestAnimationFrame(() => { $('#story-scroll').scrollTop = $('#story-scroll').scrollHeight; });
   if (ended) showEnding(game.state, newGame, () => {});
   else $('#action-input').focus({ preventScroll: true });
+}
+
+function renderAll() {
+  renderHud(game.state);
+  if ($('#sheet').classList.contains('open')) renderSheet(game);
+  if (isInventoryOpen()) renderInventory();
 }
 
 function setInputEnabled(enabled) {
@@ -208,29 +391,20 @@ function appendAction(text) {
 
 /* ---------------------------------------------------------------- a turn */
 
-async function* readEvents(response) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newline;
-    while ((newline = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (line) yield JSON.parse(line);
-    }
-  }
-  if (buffer.trim()) yield JSON.parse(buffer);
-}
-
+/** Sounds and screen effects for what just happened. */
 function effectsFor(notices) {
+  const knowsTime = hasWatch(game.state);
   for (const n of notices) {
-    if (n.stat === 'health' && n.delta < 0) return flash('hurt');
-    if (n.stat === 'sanity' && n.delta < 0) return flash('dread');
-    if (n.kind === 'deliver') return flash('boon');
+    if (n.stat === 'health') { if (n.delta < 0) { flash('hurt'); sfx('hurt'); } else sfx('heal'); }
+    else if (n.stat === 'sanity' && n.delta < 0) { flash('dread'); sfx('dread'); }
+    else if (n.stat === 'coin' && n.delta > 0) sfx('coin');
+    else if (n.kind === 'gain') sfx('pickup');
+    else if (n.kind === 'lose') sfx(n.broke ? 'drop' : 'lose');
+    else if (n.kind === 'deliver') { flash('boon'); sfx('deliver'); }
+    else if (n.kind === 'place') sfx('place');
+    else if (n.kind === 'hostile') sfx('hostile');
+    else if (n.kind === 'gate' && knowsTime) sfx(n.open ? 'gateOpen' : 'gateShut');
+    else if (n.kind === 'dawn' && knowsTime) sfx('chime');
   }
 }
 
@@ -250,7 +424,6 @@ async function runTurn(action) {
   setInputEnabled(false);
   $('#btn-act').textContent = '…';
 
-  const before = structuredClone(game.state);
   const { turn, passageEl } = createTurnElement(action);
   passageEl.classList.add('streaming');
   const waiting = document.createElement('div');
@@ -259,6 +432,10 @@ async function runTurn(action) {
   passageEl.before(waiting);
   scrollToBottom(true);
 
+  // The chronicler may still be condensing old pages; the narrator must see the result.
+  if (compacting) await compacting;
+
+  const before = structuredClone(game.state);
   game.state.turn = (before.turn || 0) + 1;
   const notices = [];
   const passage = new Passage(passageEl, {
@@ -270,37 +447,41 @@ async function runTurn(action) {
         const key = npcKey(tag.value);
         if (game.state.npcs[key]) refreshNpcMentions($('#story'), key, game.state.npcs[key]);
       }
+      if (tag.kind === 'gain') requestArt('item', { ...tag.fields, name: tag.value });
       if (changes.length) {
         notices.push(...changes);
         effectsFor(changes);
-        renderHud(game.state);
+        renderAll();
       }
     },
   });
 
   let userContent = null;
   let outcome = null;
+  let firstText = true;
   try {
-    const response = await fetch('/api/turn', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ history: game.history, state: before, action }),
+    const events = streamTurn({
+      history: game.history,
+      memory: game.memory.map((m) => m.summary),
+      state: before,
+      action,
+      opening: action == null && game.log.length === 0,
     });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw Object.assign(new Error(body.error || `The narrator did not answer (${response.status}).`), { retry: response.status >= 500 });
-    }
-    for await (const event of readEvents(response)) {
+    for await (const event of events) {
       if (event.type === 'turn') userContent = event.userContent;
       else if (event.type === 'text') {
-        waiting.remove();
+        if (firstText) {
+          firstText = false;
+          waiting.remove();
+          sfx('page');
+        }
         const follow = nearBottom();
         passage.push(event.text);
         if (follow) scrollToBottom(true);
       } else outcome = event;
     }
     if (!outcome) throw Object.assign(new Error('The narrator fell silent mid-sentence. The connection was lost.'), { retry: true });
-    if (outcome.type === 'error') throw Object.assign(new Error(outcome.message), { retry: outcome.retry });
+    if (outcome.type === 'error') throw Object.assign(new Error(outcome.message), { retry: outcome.retry, auth: outcome.auth });
     if (outcome.type === 'refusal') throw Object.assign(new Error(outcome.message), { retry: false });
     if (!userContent || !passage.raw.trim()) throw Object.assign(new Error('The narrator had nothing to say. Try again.'), { retry: true });
   } catch (error) {
@@ -308,8 +489,7 @@ async function runTurn(action) {
     game.state = before;
     turn.remove();
     waiting.remove();
-    renderHud(game.state);
-    renderSheet(game.state);
+    renderAll();
     for (const [key, npc] of Object.entries(game.state.npcs)) refreshNpcMentions($('#story'), key, npc);
     showError(error, action);
     busy = false;
@@ -325,21 +505,53 @@ async function runTurn(action) {
   passage.end();
   passageEl.classList.remove('streaming');
   if (!game.log.length) markDropCap(passageEl);
-  renderNotices(turn, notices);
+  const knewTime = hasWatch(game.state);
+  renderNotices(turn, notices, knewTime);
 
   if (game.state.stats.health <= 0 && !game.state.ended) game.state.ended = 'death';
   game.history.push({ role: 'user', content: userContent }, { role: 'assistant', content: passage.raw });
-  game.log.push({ action, raw: passage.raw, notices });
+  game.log.push({ action, raw: passage.raw, notices, knewTime });
   save();
 
-  renderHud(game.state);
-  renderSheet(game.state);
+  renderAll();
   scrollToBottom(false);
   busy = false;
   $('#btn-act').textContent = 'Act';
   setInputEnabled(!game.state.ended);
-  if (game.state.ended) setTimeout(() => showEnding(game.state, newGame, () => {}), 1800);
-  else if (!matchMedia('(pointer: coarse)').matches) $('#action-input').focus({ preventScroll: true });
+  if (game.state.ended) {
+    sfx(game.state.ended === 'freedom' ? 'freedom' : 'death');
+    setTimeout(() => showEnding(game.state, newGame, () => {}), 1800);
+    return;
+  }
+  if (!matchMedia('(pointer: coarse)').matches) $('#action-input').focus({ preventScroll: true });
+  if (needsCompaction(game)) runCompaction();
+}
+
+/** Condenses the oldest turns into the chronicle, in the background. */
+function runCompaction() {
+  if (compacting) return;
+  const target = game;
+  const note = document.createElement('div');
+  note.className = 'chronicler';
+  note.innerHTML = '<span class="quill" aria-hidden="true">✒</span> The chronicler condenses the oldest pages…';
+  $('#story').appendChild(note);
+  scrollToBottom(false);
+  sfx('scribble');
+  compacting = compact(target)
+    .then((count) => {
+      if (game !== target) return;
+      save();
+      note.classList.add('done');
+      note.innerHTML = `<span class="quill" aria-hidden="true">✒</span> ${count} older turn${count === 1 ? '' : 's'} condensed into the chronicle (see the ledger).`;
+      if ($('#sheet').classList.contains('open')) renderSheet(game);
+    })
+    .catch((error) => {
+      console.warn('[descend] chronicle not updated:', error.message);
+      note.remove();
+    })
+    .finally(() => {
+      compacting = null;
+    });
 }
 
 function showError(error, action) {
@@ -347,6 +559,8 @@ function showError(error, action) {
   const box = document.createElement('div');
   box.className = 'story-error';
   box.innerHTML = `<p>${escapeHtml(error.message || 'Something went wrong.')}</p>`;
+  const buttons = document.createElement('div');
+  buttons.className = 'story-error-actions';
   if (error.retry !== false || !action) {
     const retry = document.createElement('button');
     retry.className = 'btn btn-small';
@@ -358,9 +572,19 @@ function showError(error, action) {
       autosize();
       runTurn(action);
     });
-    box.appendChild(retry);
+    buttons.appendChild(retry);
   }
+  if (error.auth) {
+    const settingsButton = document.createElement('button');
+    settingsButton.className = 'btn btn-small btn-ghost';
+    settingsButton.type = 'button';
+    settingsButton.textContent = 'Change the narrator or key';
+    settingsButton.addEventListener('click', showTitle);
+    buttons.appendChild(settingsButton);
+  }
+  box.appendChild(buttons);
   $('#story').appendChild(box);
+  sfx('invalid');
   scrollToBottom(true);
 }
 
@@ -378,7 +602,7 @@ function npcActionText(action, name) {
   }[action];
 }
 
-function openNpc(anchor, key, fallback) {
+function openNpc(anchor, key, fallback, { closePanels = false } = {}) {
   const npc = game.state.npcs[key] || fallback;
   const dead = isDead(npc);
   const alignment = alignmentOf(npc);
@@ -386,6 +610,7 @@ function openNpc(anchor, key, fallback) {
     if (action === 'examine') {
       examineNpc(game.state.npcs[key] || npc, NPC_ACTIONS.filter((a) => a !== 'examine'), act);
     } else {
+      if (closePanels) setSheetOpen(false);
       appendAction(npcActionText(action, npc.name));
     }
   };
@@ -406,20 +631,26 @@ function openStoryItem(anchor, entity) {
   openMenu(anchor, { title: entity.name, subtitle: item.type || 'item', tone: 'item', actions: ['examine', 'pickup'] }, act);
 }
 
-function openCarriedItem(anchor, item, equipped) {
+/** The menu for something carried: from the inventory grid or an equipment slot. */
+function openCarriedMenu(anchor, source, ops) {
+  const { item } = source;
   const actions = ['examine', 'use'];
-  if (equipped) actions.push('unequip');
-  else if (inferSlot(item)) actions.push('equip');
+  if (source.kind === 'slot') actions.push('unequip');
+  else {
+    if (slotAccepts(targetSlot(game.state, item), item)) actions.push('equip');
+    const shape = itemShape(item);
+    if (item.x != null && shape.w !== shape.h) actions.push('rotate');
+  }
   actions.push('drop');
   const act = (action) => {
-    if (action === 'examine') {
-      examineItem(item, actions.filter((a) => a !== 'examine'), act);
-      return;
-    }
-    setSheetOpen(false);
-    appendAction(`${action} ${item.name}`);
+    if (action === 'examine') examineItem(item, actions.filter((a) => a !== 'examine' && a !== 'rotate'), act);
+    else if (action === 'use' || action === 'drop') appendAction(`${action} ${item.name}`);
+    else if (action === 'equip') ops.equipTo(targetSlot(game.state, item));
+    else if (action === 'unequip') ops.unequip();
+    else if (action === 'rotate') ops.rotate();
   };
-  openMenu(anchor, { title: item.name, subtitle: equipped ? `${item.type || 'item'} · equipped` : item.type || 'item', tone: 'item', actions }, act);
+  const where = source.kind === 'slot' ? 'equipped' : item.x == null ? 'loose' : 'in the pack';
+  openMenu(anchor, { title: item.name, subtitle: `${item.type || 'item'} · ${where}`, tone: 'item', actions }, act);
 }
 
 function onStoryActivate(target) {
@@ -432,28 +663,18 @@ function onStoryActivate(target) {
 }
 
 function onSheetActivate(target) {
-  const slot = target.closest('[data-slot]');
-  const packed = target.closest('[data-pack]');
   const face = target.closest('[data-npc]');
-  if (slot) {
-    const item = game.state.equipment[slot.dataset.slot];
-    if (item) openCarriedItem(slot, item, true);
-  } else if (packed) {
-    const item = game.state.pack[Number(packed.dataset.pack)];
-    if (item) openCarriedItem(packed, item, false);
-  } else if (face) {
-    const npc = game.state.npcs[face.dataset.npc];
-    if (!npc) return;
-    const act = (action) => {
-      if (action === 'examine') examineNpc(npc, NPC_ACTIONS.filter((a) => a !== 'examine'), (a) => { setSheetOpen(false); appendAction(npcActionText(a, npc.name)); });
-      else { setSheetOpen(false); appendAction(npcActionText(action, npc.name)); }
-    };
-    const dead = isDead(npc);
-    openMenu(face, { title: npc.name, subtitle: `${npc.type || 'stranger'} · ${dead ? 'dead' : alignmentOf(npc)}`, tone: dead ? 'neutral' : alignmentOf(npc), actions: dead ? ['examine'] : NPC_ACTIONS }, act);
-  }
+  if (!face) return;
+  const npc = game.state.npcs[face.dataset.npc];
+  if (npc) openNpc(face, face.dataset.npc, npc, { closePanels: true });
 }
 
-/* ---------------------------------------------------------------- new game / menu */
+function afterInventoryChange() {
+  save();
+  renderAll();
+}
+
+/* ---------------------------------------------------------------- new game / menus */
 
 function newGame() {
   if (game && !game.state.ended && game.log.length && !confirm('Abandon this prisoner to the dark and begin anew?')) return;
@@ -462,15 +683,36 @@ function newGame() {
   startCreation();
 }
 
+function toggleInventory(open = !isInventoryOpen()) {
+  if (open && window.innerWidth < 1100) setSheetOpen(false);
+  setInventoryOpen(open);
+  document.body.classList.toggle('inventory-open', open);
+}
+
+function toggleSheet(open = !$('#sheet').classList.contains('open')) {
+  if (open) {
+    renderSheet(game);
+    if (window.innerWidth < 1100) toggleInventory(false);
+  }
+  setSheetOpen(open);
+}
+
 /* ---------------------------------------------------------------- wiring */
 
 function wire() {
+  initNarratorCard();
+  $('#btn-inventory').innerHTML = PERSON_GLYPH;
+  $('#btn-sheet').innerHTML = LEDGER_GLYPH;
+
   $('#btn-new').addEventListener('click', () => {
-    if (loadSave() && !loadSave().state.ended && !confirm('Your current prisoner will be lost to the dark. Begin anew?')) return;
+    if (!requireNarrator()) return;
+    const saved = loadSave();
+    if (saved && !saved.state.ended && !confirm('Your current prisoner will be lost to the dark. Begin anew?')) return;
     clearSave();
     startCreation();
   });
   $('#btn-continue').addEventListener('click', () => {
+    if (!requireNarrator()) return;
     game = loadSave();
     if (game) enterGame();
   });
@@ -482,8 +724,12 @@ function wire() {
     writ.style.animation = 'none';
     void writ.offsetWidth;
     writ.style.animation = '';
+    sfx('page');
   });
-  $('#btn-begin').addEventListener('click', beginGame);
+  $('#btn-begin').addEventListener('click', () => {
+    sfx('gateShut');
+    beginGame();
+  });
   $('#cc-name').addEventListener('input', renderWrit);
   document.querySelectorAll('input[name="pronouns"]').forEach((r) => r.addEventListener('change', renderWrit));
 
@@ -496,6 +742,7 @@ function wire() {
     input.value = '';
     autosize();
     document.querySelector('.story-error')?.remove();
+    sfx('submit');
     runTurn(action);
   });
   input.addEventListener('keydown', (e) => {
@@ -515,49 +762,112 @@ function wire() {
     }
   });
 
-  $('#btn-sheet').addEventListener('click', () => {
-    const open = !$('#sheet').classList.contains('open');
-    if (open) renderSheet(game.state);
-    setSheetOpen(open);
-  });
+  $('#btn-inventory').addEventListener('click', () => toggleInventory());
+  $('#btn-sheet').addEventListener('click', () => toggleSheet());
   $('#sheet-close').addEventListener('click', () => setSheetOpen(false));
+  $('#inventory-close').addEventListener('click', () => document.body.classList.remove('inventory-open'));
   $('#sheet-content').addEventListener('click', (e) => onSheetActivate(e.target));
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && $('#entity-menu').hidden && $('#examine').hidden && $('#sheet').classList.contains('open')) {
-      setSheetOpen(false);
-      $('#btn-sheet').focus();
+    const typing = e.target.closest?.('input, textarea, select, [contenteditable]');
+    const inGame = !$('#screen-game').hidden;
+    const overlay = !$('#entity-menu').hidden || !$('#examine').hidden;
+    if (e.key === 'Escape' && inGame && !overlay) {
+      if ($('#sheet').classList.contains('open')) setSheetOpen(false);
+      else if (isInventoryOpen()) toggleInventory(false);
+      return;
     }
+    if (overlay || !inGame || !game || e.ctrlKey || e.metaKey) return;
+    // Plain I / L when not typing; Alt+I / Alt+L work from inside the action box too.
+    if (typing ? !e.altKey : e.altKey) return;
+    if (e.code === 'KeyI') { e.preventDefault(); toggleInventory(); }
+    if (e.code === 'KeyL') { e.preventDefault(); toggleSheet(); }
   });
 
   const menuButton = $('#btn-menu');
   const menu = $('#game-menu');
+  const soundLabel = () => { menu.querySelector('[data-menu="sound"]').textContent = `Sound: ${settings.sound ? 'on' : 'off'}`; };
   const closeGameMenu = () => { menu.hidden = true; menuButton.setAttribute('aria-expanded', 'false'); };
   menuButton.addEventListener('click', (e) => {
     e.stopPropagation();
+    soundLabel();
     menu.hidden = !menu.hidden;
     menuButton.setAttribute('aria-expanded', String(!menu.hidden));
   });
   document.addEventListener('click', (e) => { if (!menu.contains(e.target)) closeGameMenu(); });
   menu.addEventListener('click', (e) => {
     const choice = e.target.closest('button')?.dataset.menu;
+    if (choice === 'sound') {
+      settings.sound = !settings.sound;
+      saveSettings();
+      configureAudio(settings);
+      soundLabel();
+      return;
+    }
     closeGameMenu();
     if (choice === 'new') newGame();
     if (choice === 'title') showTitle();
   });
+
+  // Browsers allow sound only after the player does something.
+  const unlock = () => {
+    unlockAudio();
+    configureAudio(settings);
+  };
+  window.addEventListener('pointerdown', unlock, { once: true, capture: true });
+  window.addEventListener('keydown', unlock, { once: true, capture: true });
+
+  // Interface sounds.
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.btn, .rail-btn, .provider-pick button, .game-menu button, .pronouns label')) sfx('click');
+  }, true);
+  document.addEventListener('pointerover', (e) => {
+    const el = e.target.closest('.btn, .rail-btn, .entity, .provider-pick button, .entity-menu button');
+    if (el && !el.contains(e.relatedTarget)) sfx('hover');
+  });
+
+  // A generated picture that fails to load falls back to the hand-drawn one.
+  document.addEventListener('error', (e) => {
+    const img = e.target;
+    if (!img?.classList?.contains('art-img')) return;
+    dropArt(img.getAttribute('src'));
+    save();
+    img.remove();
+  }, true);
+
+  initInventory({
+    getGame: () => game,
+    onChange: afterInventoryChange,
+    onAction: appendAction,
+    onItemMenu: openCarriedMenu,
+  });
+  initArt({
+    getGame: () => game,
+    onSave: save,
+    onReady: (key) => {
+      refreshExamineArt(key);
+      if (isInventoryOpen()) renderInventory();
+      if (key.startsWith('npc:') && $('#sheet').classList.contains('open')) renderSheet(game);
+    },
+  });
 }
 
-async function showNarratorStatus() {
+async function loadServerStatus() {
   try {
-    const status = await (await fetch('/api/status')).json();
-    $('#narrator-status').textContent = status.mock
-      ? 'Mock narrator: a canned tale, no AI calls'
-      : `Narrated by ${status.model}`;
+    Object.assign(server, await getJson('/api/status'));
   } catch {
-    $('#narrator-status').textContent = 'The narrator cannot be reached. Is the server running?';
+    setKeyStatus('The game server cannot be reached. Is it still running?', 'bad');
+    return;
   }
+  // Default to whatever the server already has a key for.
+  if (!settings.provider) settings.provider = server.env.anthropic ? 'anthropic' : server.env.openai ? 'openai' : '';
+  refreshNarratorCard();
+  const provider = effectiveProvider();
+  if ((provider === 'anthropic' || provider === 'openai') && (settings.keys[provider] || server.env[provider])) checkKey();
 }
 
 wire();
+configureAudio(settings);
 startMotes($('#motes'));
 showTitle();
-showNarratorStatus();
+loadServerStatus();

@@ -1,9 +1,12 @@
 // Interface pieces: HUD, character ledger, entity menus, examine cards, effects.
 
-import { ATTRIBUTES, SLOTS } from './character.js';
+import { ATTRIBUTES } from './character.js';
 import { itemIcon, itemIconKey, npcPortrait } from './icons.js';
-import { alignmentOf, isDead } from './state.js';
+import { alignmentOf, isDead, hasWatch } from './state.js';
 import { smartQuotes } from './story.js';
+import { clockParts, formatHour } from './clock.js';
+import { artImg, artKey, requestArt, isPending, artEnabled } from './art.js';
+import { sfx } from './audio.js';
 
 const $ = (sel) => document.querySelector(sel);
 export const escapeHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -13,17 +16,52 @@ const toNum = (v) => {
   const n = parseInt(String(v ?? '').replace(/[^\d+-]/g, ''), 10);
   return Number.isFinite(n) ? n : null;
 };
-
-/* ---------------------------------------------------------------- time icons */
-
-const TIME_ICONS = {
-  dawn: '<svg viewBox="0 0 16 16"><path d="M1 12h14" stroke="#c98a5a" stroke-width="1.5"/><path d="M4 12a4 4 0 0 1 8 0" fill="#e8a060"/><path d="M8 3v2M3 6l1.4 1.4M13 6l-1.4 1.4" stroke="#e8a060" stroke-width="1.3" stroke-linecap="round"/></svg>',
-  day: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="3.4" fill="#e8c05a"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M3 13l1.4-1.4M11.6 4.4L13 3" stroke="#e8c05a" stroke-width="1.3" stroke-linecap="round"/></svg>',
-  dusk: '<svg viewBox="0 0 16 16"><path d="M1 11h14" stroke="#8a5a6a" stroke-width="1.5"/><path d="M4 11a4 4 0 0 1 8 0" fill="#b0584a"/><path d="M3 14h10" stroke="#5a3a4a" stroke-width="1.2"/></svg>',
-  night: '<svg viewBox="0 0 16 16"><path d="M10.5 2.2A6 6 0 1 0 13.8 11 5 5 0 0 1 10.5 2.2z" fill="#b8b4d8"/><circle cx="3" cy="3" r=".7" fill="#b8b4d8"/><circle cx="14" cy="5" r=".6" fill="#b8b4d8"/></svg>',
-};
+const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII'];
 
 /* ---------------------------------------------------------------- HUD */
+
+const WATCH_FACE = `<svg class="watch-face" viewBox="0 0 32 34" aria-hidden="true">
+  <circle cx="16" cy="4" r="2.4" fill="none" stroke="#d9b24a" stroke-width="1.4"/>
+  <circle cx="16" cy="19" r="13" fill="#d9b24a" stroke="#140e0a" stroke-width="1.5"/>
+  <circle cx="16" cy="19" r="10.2" fill="#efe4c6" stroke="#140e0a" stroke-width="1"/>
+  <path d="M16 10.5v1.6M16 26v1.6M7.5 19h1.6M22.9 19h1.6" stroke="#140e0a" stroke-width="1"/>
+  <path class="hand hour" d="M16 19 L16 13" stroke="#140e0a" stroke-width="1.8" stroke-linecap="round"/>
+  <path class="hand minute" d="M16 19 L16 10.8" stroke="#140e0a" stroke-width="1.1" stroke-linecap="round"/>
+  <circle cx="16" cy="19" r="1.1" fill="#140e0a"/>
+</svg>`;
+
+let lastHands = null;
+
+function renderClock(state) {
+  const box = $('#hud-clock');
+  if (!hasWatch(state)) {
+    box.className = 'hud-clock unknown';
+    box.title = 'Equip a pocket watch to tell the hour';
+    box.innerHTML = '<span class="hour-unknown">The hour is unknown</span>';
+    lastHands = null;
+    return;
+  }
+  const t = clockParts(state.clock);
+  if (!box.querySelector('.watch-face')) {
+    box.className = 'hud-clock known';
+    box.title = 'Your pocket watch';
+    box.innerHTML = `${WATCH_FACE}<span class="clock-text"><b class="num clock-hour"></b> <span class="clock-day"></span></span><span class="gate"></span>`;
+  }
+  // Angles grow with the clock so the hands always sweep forward; if time is rolled back
+  // (a failed turn is undone) they jump back instead of spinning backwards.
+  const minuteAngle = t.total * 6;
+  const hourAngle = t.total * 0.5;
+  const hands = box.querySelectorAll('.hand');
+  hands.forEach((hand) => { hand.style.transition = lastHands !== null && minuteAngle < lastHands ? 'none' : ''; });
+  box.querySelector('.hand.minute').style.transform = `rotate(${minuteAngle}deg)`;
+  box.querySelector('.hand.hour').style.transform = `rotate(${hourAngle}deg)`;
+  lastHands = minuteAngle;
+  box.querySelector('.clock-hour').textContent = formatHour(t);
+  box.querySelector('.clock-day').textContent = `Day ${t.day}`;
+  const gate = box.querySelector('.gate');
+  gate.textContent = t.gateOpen ? 'Gate open' : 'Gate sealed';
+  gate.className = `gate ${t.gateOpen ? 'open' : 'sealed'}`;
+}
 
 export function renderHud(state) {
   const s = state.stats;
@@ -34,13 +72,7 @@ export function renderHud(state) {
     void loc.offsetWidth;
     loc.classList.add('fresh');
   }
-  $('#hud-time-icon').innerHTML = TIME_ICONS[state.time] || TIME_ICONS.night;
-  $('#hud-day').textContent = `Day ${state.day} · ${cap(state.time)}`;
-  const gate = $('#hud-gate');
-  const open = state.time === 'day';
-  gate.textContent = open ? 'Gate open' : 'Gate sealed';
-  gate.className = `gate ${open ? 'open' : 'sealed'}`;
-
+  renderClock(state);
   const set = (key, value, max, low) => {
     $(`#bar-${key}`).style.width = pct(value, max);
     $(`#num-${key}`).textContent = `${value}/${max}`;
@@ -50,22 +82,19 @@ export function renderHud(state) {
   set('hunger', s.hunger, 10, s.hunger >= 8);
   set('sanity', s.sanity, 10, s.sanity <= 3);
   $('#hud-artifacts').textContent = `${state.artifactsDelivered}/${state.artifactGoal}`;
-  document.body.dataset.time = state.time;
 }
 
 /* ---------------------------------------------------------------- ledger */
 
-function itemTile(item, attrs, cls) {
-  const artifact = String(item.type).toLowerCase() === 'artifact';
-  return `<button type="button" class="${cls}${artifact ? ' artifact' : ''}" ${attrs} title="${escapeHtml(item.name)}">
-    ${itemIcon(item)}
-    ${(item.qty || 1) > 1 ? `<span class="qty">×${item.qty}</span>` : ''}
-    <span class="${cls === 'slot' ? 'slot-name' : 'pack-name'}">${escapeHtml(item.name)}</span>
-  </button>`;
+function faceArt(npc) {
+  return artImg('npc', npc) || npcPortrait(npc, alignmentOf(npc));
 }
 
-export function renderSheet(state) {
+export function renderSheet(game) {
+  const { state, memory = [] } = game;
   const { character: c, stats: s } = state;
+  const watch = hasWatch(state);
+  const t = clockParts(state.clock);
   const faces = Object.entries(state.npcs).sort((a, b) => (b[1].lastSeen ?? 0) - (a[1].lastSeen ?? 0));
   $('#sheet-content').innerHTML = `
     <div class="ledger">
@@ -85,23 +114,9 @@ export function renderSheet(state) {
       </div>
       <div class="ledger-facts">
         <div><span>Coin</span><br><b>${s.coin}</b> copper${s.coin === 1 ? '' : 's'}</div>
-        <div><span>Days below</span><br><b>${state.day}</b></div>
+        <div title="${watch ? '' : 'Without a watch, the days blur together'}"><span>Days below</span><br><b>${watch ? t.day : '?'}</b></div>
         <div><span>Relics delivered</span><div class="relic-pips">${Array.from({ length: state.artifactGoal }, (_, i) => `<i class="${i < state.artifactsDelivered ? 'on' : ''}"></i>`).join('')}</div></div>
       </div>
-
-      <h3>Worn &amp; wielded</h3>
-      <div class="slots">
-        ${SLOTS.map(({ key, label }) => {
-          const item = state.equipment[key];
-          if (!item) return `<div class="slot empty"><span class="slot-empty">·</span><span class="slot-label">${label}</span></div>`;
-          return itemTile(item, `data-slot="${key}"`, 'slot').replace('</button>', `<span class="slot-label">${label}</span></button>`);
-        }).join('')}
-      </div>
-
-      <h3>Pack</h3>
-      ${state.pack.length
-        ? `<div class="pack">${state.pack.map((item, i) => itemTile(item, `data-pack="${i}"`, 'pack-item')).join('')}</div>`
-        : '<p class="empty-note">Nothing but lint and regret.</p>'}
 
       <h3>Faces in the dark</h3>
       ${faces.length
@@ -109,20 +124,28 @@ export function renderSheet(state) {
             const dead = isDead(npc);
             const align = dead ? 'dead' : alignmentOf(npc);
             return `<button type="button" class="face${dead ? ' dead' : ''}" data-npc="${escapeHtml(key)}">
-              <span class="face-art">${npcPortrait(npc, alignmentOf(npc))}</span>
+              <span class="face-art">${faceArt(npc)}</span>
               <span class="face-name">${escapeHtml(npc.name)}<small>${escapeHtml(npc.type || 'stranger')}${dead ? ' · dead' : ''}</small></span>
               <span class="face-dot ${align}"></span>
             </button>`;
           }).join('')}</div>`
         : '<p class="empty-note">No one has seen fit to share their name.</p>'}
+
+      <h3>The chronicle</h3>
+      ${memory.length
+        ? `<p class="chron-note">Older pages, condensed so the narrator remembers what the full text no longer shows.</p>
+           ${memory.map((m, i) => `<p class="chron-entry"><span class="chron-mark">${ROMAN[i] || i + 1}</span>${escapeHtml(smartQuotes(m.summary))}</p>`).join('')}`
+        : '<p class="empty-note">Nothing yet has faded enough to need the chronicler.</p>'}
     </div>`;
 }
 
 export function setSheetOpen(open) {
   const sheet = $('#sheet');
+  if (sheet.classList.contains('open') === open) return;
   sheet.classList.toggle('open', open);
   sheet.setAttribute('aria-hidden', String(!open));
   $('#btn-sheet').setAttribute('aria-expanded', String(open));
+  sfx(open ? 'open' : 'close');
   if (open) $('#sheet-close').focus({ preventScroll: true });
 }
 
@@ -130,11 +153,11 @@ export function setSheetOpen(open) {
 
 const GLYPHS = {
   examine: '◈', pickup: '⇡', attack: '⚔︎', talk: '❝', trade: '⚖︎', gift: '❦', steal: '☍',
-  use: '✧', equip: '⛨︎', unequip: '⤓', drop: '⤈',
+  use: '✧', equip: '⛨︎', unequip: '⤓', drop: '⤈', rotate: '⟳',
 };
 const LABELS = {
   examine: 'Examine', pickup: 'Pick Up', attack: 'Attack', talk: 'Talk', trade: 'Trade', gift: 'Gift', steal: 'Steal',
-  use: 'Use', equip: 'Equip', unequip: 'Unequip', drop: 'Drop',
+  use: 'Use', equip: 'Equip', unequip: 'Unequip', drop: 'Drop', rotate: 'Rotate',
 };
 
 let menuCleanup = null;
@@ -142,7 +165,7 @@ let menuCleanup = null;
 export function closeMenu() {
   const menu = $('#entity-menu');
   menu.hidden = true;
-  document.querySelectorAll('.entity.active').forEach((el) => el.classList.remove('active'));
+  document.querySelectorAll('.entity.active, [data-item].active').forEach((el) => el.classList.remove('active'));
   menuCleanup?.();
   menuCleanup = null;
 }
@@ -155,6 +178,7 @@ export function closeMenu() {
  */
 export function openMenu(anchor, spec, onSelect) {
   closeMenu();
+  sfx('menu');
   const menu = $('#entity-menu');
   menu.innerHTML = `
     <div class="menu-title ${spec.tone}">${escapeHtml(spec.title)}${spec.subtitle ? `<small>${escapeHtml(spec.subtitle)}</small>` : ''}</div>
@@ -167,7 +191,7 @@ export function openMenu(anchor, spec, onSelect) {
   const mw = menu.offsetWidth;
   const mh = menu.offsetHeight;
   const margin = 8;
-  let left = Math.min(Math.max(margin, rect.left - 6), window.innerWidth - mw - margin);
+  const left = Math.min(Math.max(margin, rect.left - 6), window.innerWidth - mw - margin);
   let top = rect.bottom + 10;
   if (top + mh > window.innerHeight - margin) {
     top = rect.top - mh - 10;
@@ -200,7 +224,7 @@ export function openMenu(anchor, spec, onSelect) {
   setTimeout(() => document.addEventListener('pointerdown', onOutside), 0);
   document.addEventListener('keydown', onKey);
   // Close once the anchor has scrolled noticeably away (small scrolls, e.g. focus nudges, are ignored).
-  const scroller = anchor.closest('#story-scroll, .sheet-content');
+  const scroller = anchor.closest('#story-scroll, .sheet-content, .inventory-content');
   const startScroll = scroller?.scrollTop ?? 0;
   const onScroll = () => { if (Math.abs(scroller.scrollTop - startScroll) > 40) closeMenu(); };
   scroller?.addEventListener('scroll', onScroll);
@@ -219,7 +243,7 @@ export function openMenu(anchor, spec, onSelect) {
 
 const ITEM_STAT_ORDER = ['damage', 'defense', 'durability', 'uses', 'weight', 'value', 'effect'];
 const NPC_SKIP = new Set(['name', 'description', 'alignment', 'type', 'health', 'relationship', 'firstseen', 'lastseen', 'firstSeen', 'lastSeen', 'maxhealth', 'maxHealth', 'peakHealth']);
-const ITEM_SKIP = new Set(['name', 'description', 'type', 'qty', 'maxDurability', 'slot', 'durability']);
+const ITEM_SKIP = new Set(['name', 'description', 'type', 'qty', 'maxDurability', 'slot', 'durability', 'id', 'x', 'y', 'rot']);
 const label = (k) => cap(String(k).replace(/_/g, ' '));
 
 function statChip(key, value) {
@@ -230,6 +254,7 @@ function statChip(key, value) {
 }
 
 let tiltCleanup = null;
+let examined = null;
 
 function attachTilt(card) {
   const stage = $('#examine');
@@ -245,10 +270,8 @@ function attachTilt(card) {
       card.style.setProperty('--rx', `${-y * 6}deg`);
       if (plate) {
         const pr = plate.getBoundingClientRect();
-        const gx = ((e.clientX - pr.left) / pr.width) * 100;
-        const gy = ((e.clientY - pr.top) / pr.height) * 100;
-        plate.style.setProperty('--gx', `${gx}%`);
-        plate.style.setProperty('--gy', `${gy}%`);
+        plate.style.setProperty('--gx', `${((e.clientX - pr.left) / pr.width) * 100}%`);
+        plate.style.setProperty('--gy', `${((e.clientY - pr.top) / pr.height) * 100}%`);
         plate.style.setProperty('--tx', `${x * 9}px`);
         plate.style.setProperty('--ty', `${y * 7}px`);
       }
@@ -276,6 +299,7 @@ export function closeExamine() {
   const overlay = $('#examine');
   if (overlay.hidden) return;
   overlay.hidden = true;
+  examined = null;
   tiltCleanup?.();
   tiltCleanup = null;
   document.removeEventListener('keydown', examineKey);
@@ -285,6 +309,7 @@ export function closeExamine() {
 function showExamine(html, cls, actions, onAction) {
   closeMenu();
   closeExamine();
+  sfx('examine');
   examineReturnFocus = document.activeElement;
   const overlay = $('#examine');
   const card = $('#examine-card');
@@ -319,17 +344,37 @@ function showExamine(html, cls, actions, onAction) {
   card.querySelector('.examine-close').focus({ preventScroll: true });
 }
 
+/** The plate's picture: generated art when there is some, otherwise the hand-drawn one while the artist works. */
+function plateArt(kind, subject, fallback) {
+  requestArt(kind, subject);
+  const img = artImg(kind, subject, 'plate-img');
+  const sketching = !img && artEnabled() && isPending(kind, subject);
+  return `<div class="plate-art${img ? ' has-art' : ''}">${img || fallback}</div>${sketching ? '<div class="sketching">The artist is sketching…</div>' : ''}`;
+}
+
+/** Called when an illustration arrives: swaps it into the open examine card. */
+export function refreshExamineArt(key) {
+  if (!examined || artKey(examined.kind, examined.subject) !== key) return;
+  const plate = document.querySelector('#examine-card .plate');
+  const img = artImg(examined.kind, examined.subject, 'plate-img');
+  if (!plate || !img) return;
+  plate.querySelector('.sketching')?.remove();
+  const art = plate.querySelector('.plate-art');
+  art.classList.add('has-art', 'arrived');
+  art.innerHTML = img;
+}
+
 /** Shows an item's card. `actions` are the buttons offered underneath. */
 export function examineItem(item, actions, onAction) {
   const type = String(item.type || 'curio').toLowerCase();
-  const artifact = type === 'artifact';
+  const artifact = type === 'artifact' || type === 'relic';
   const stats = [];
   for (const key of ITEM_STAT_ORDER) {
     if (key === 'durability' || item[key] == null || item[key] === '') continue;
     stats.push(statChip(key, item[key]));
   }
   for (const [key, value] of Object.entries(item)) {
-    if (ITEM_SKIP.has(key) || ITEM_STAT_ORDER.includes(key) || value === '' || value == null) continue;
+    if (ITEM_SKIP.has(key) || ITEM_STAT_ORDER.includes(key) || value === '' || value == null || typeof value === 'object') continue;
     stats.push(statChip(key, value));
   }
   const dur = toNum(item.durability);
@@ -339,7 +384,7 @@ export function examineItem(item, actions, onAction) {
     : '';
   showExamine(`
     <div class="plate${artifact ? ' artifact' : ''}" data-icon="${itemIconKey(item)}">
-      <div class="plate-art">${itemIcon(item)}</div>
+      ${plateArt('item', item, itemIcon(item))}
       <div class="dust"></div><div class="glare"></div>
     </div>
     <p class="examine-kicker">${artifact ? '✶ Relic of the Dakavi' : escapeHtml(cap(type))}${(item.qty || 1) > 1 ? ` · ×${item.qty}` : ''}</p>
@@ -348,6 +393,7 @@ export function examineItem(item, actions, onAction) {
     ${durability}
     ${stats.length ? `<div class="stat-grid">${stats.join('')}</div>` : ''}`,
   `item${artifact ? ' artifact' : ''}`, actions, onAction);
+  examined = { kind: 'item', subject: item };
 }
 
 /** Shows an NPC's card. */
@@ -365,7 +411,7 @@ export function examineNpc(npc, actions, onAction) {
   }
   showExamine(`
     <div class="plate portrait${dead ? ' dead' : ''}">
-      <div class="plate-art">${npcPortrait(npc, alignment)}</div>
+      ${plateArt('npc', npc, npcPortrait(npc, alignment))}
       ${dead ? '<div class="stamp">Slain</div>' : ''}
       <div class="dust"></div><div class="glare"></div>
     </div>
@@ -376,6 +422,7 @@ export function examineNpc(npc, actions, onAction) {
     <div class="meter"><div class="meter-head"><span>Regard for you</span><b>${feeling} (${rel > 0 ? '+' : ''}${rel})</b></div><div class="meter-track relation"><div class="meter-mark" style="left:${((rel + 10) / 20) * 100}%"></div></div></div>
     ${stats.length ? `<div class="stat-grid">${stats.join('')}</div>` : ''}`,
   `npc ${alignment}`, dead ? actions.filter((a) => a === 'examine') : actions, onAction);
+  examined = { kind: 'npc', subject: npc };
 }
 
 /* ---------------------------------------------------------------- effects */
@@ -396,8 +443,9 @@ export function flash(kind) {
 export function showEnding(state, onNew, onRead) {
   const overlay = $('#ending');
   const freed = state.ended === 'freedom';
+  const { day } = clockParts(state.clock);
   overlay.className = `ending ${freed ? 'freedom' : 'death'}`;
-  $('#ending-kicker').textContent = freed ? `After ${state.day} day${state.day === 1 ? '' : 's'} below` : `Day ${state.day} in Dakavinor`;
+  $('#ending-kicker').textContent = freed ? `After ${day} day${day === 1 ? '' : 's'} below` : `Day ${day} in Dakavinor`;
   $('#ending-title').textContent = freed ? 'Daylight' : 'The dark keeps you';
   const name = escapeHtml(state.character.name);
   $('#ending-text').innerHTML = freed

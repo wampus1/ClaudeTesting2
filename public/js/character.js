@@ -1,5 +1,8 @@
 // Random character generation: the condemned prisoner's crime, trade, attributes and gear.
 
+import { START_CLOCK } from './clock.js';
+import { newId, place } from './grid.js';
+
 export const ARTIFACT_GOAL = 5;
 export const ATTRIBUTES = [
   { key: 'strength', label: 'Strength', blurb: 'Might of arm and back' },
@@ -10,11 +13,14 @@ export const ATTRIBUTES = [
   { key: 'luck', label: 'Luck', blurb: "Fortune's rare favour" },
 ];
 export const SLOTS = [
-  { key: 'weapon', label: 'Weapon' },
+  { key: 'weapon', label: 'Hand' },
   { key: 'head', label: 'Head' },
   { key: 'body', label: 'Body' },
   { key: 'feet', label: 'Feet' },
   { key: 'trinket', label: 'Trinket' },
+  { key: 'gadget1', label: 'Gadget', special: true },
+  { key: 'gadget2', label: 'Gadget', special: true },
+  { key: 'relic', label: 'Relic', special: true },
 ];
 
 const NAMES = ['Wren', 'Aldric', 'Maud', 'Tobin', 'Isolde', 'Garrick', 'Edda', 'Fenn', 'Rowan', 'Cuthbert', 'Sabine', 'Osric', 'Brenna', 'Hale', 'Ysolde', 'Marek', 'Agnes', 'Corwin', 'Tamsin', 'Jory', 'Bertil', 'Nell'];
@@ -98,9 +104,15 @@ const PACK_ITEMS = [
   { name: 'strip of salt pork', type: 'food', value: '2', description: 'Leathery, grey, and so salty it hurts.' },
 ];
 
+const POCKET_WATCH = { name: 'cracked pocket watch', type: 'gadget', effect: 'tells the hour', value: '12', description: 'Brass gone brown, the crystal starred with a crack. It still ticks, and down there that is worth more than gold.' };
+const GADGETS = [
+  { name: 'brass compass', type: 'gadget', effect: 'finds north, mostly', value: '8', description: 'The needle trembles and hunts, then settles. Underground it sometimes settles on things that are not north.' },
+  { name: 'tin spyglass', type: 'gadget', effect: 'sees far in faint light', value: '10', description: 'Dented, the lens scratched, the leather grip gone greasy with other hands.' },
+];
+
 const d = (n) => 1 + Math.floor(Math.random() * n);
 const pick = (list) => list[Math.floor(Math.random() * list.length)];
-const clone = (item) => ({ ...item, ...(item.durability ? { maxDurability: item.durability } : {}), qty: 1 });
+const clone = (item) => ({ ...item, ...(item.durability ? { maxDurability: item.durability } : {}), id: newId(), qty: 1 });
 
 function sample(list, count) {
   const pool = [...list];
@@ -131,7 +143,16 @@ export function rollCharacter({ name, pronouns }) {
     body: clone(pick(BODY)),
     feet: clone(pick(FEET)),
     trinket: Math.random() < 0.65 ? clone(pick(TRINKETS)) : null,
+    // Only a lucky few know the hour.
+    gadget1: Math.random() < 0.35 ? clone(POCKET_WATCH) : null,
+    gadget2: Math.random() < 0.2 ? clone(pick(GADGETS)) : null,
+    relic: null,
   };
+  const pack = [];
+  for (const item of sample(PACK_ITEMS, 2 + d(2)).map(clone)) {
+    place(pack, item);
+    pack.push(item);
+  }
 
   return {
     character: {
@@ -142,9 +163,8 @@ export function rollCharacter({ name, pronouns }) {
     },
     stats,
     equipment,
-    pack: sample(PACK_ITEMS, 2 + d(2)).map(clone),
-    day: 1,
-    time: 'dusk',
+    pack,
+    clock: START_CLOCK,
     location: 'The Long Stair',
     artifactsDelivered: 0,
     artifactGoal: ARTIFACT_GOAL,
