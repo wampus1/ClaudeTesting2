@@ -7,7 +7,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "mock": "DESCEND_MOCK=1 node server.js"
+    "mock": "node server.js --mock"
   },
   "engines": {
     "node": ">=20.12"
